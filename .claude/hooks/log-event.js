@@ -31,6 +31,7 @@ process.stdin.on('end', () => {
       tool: p.tool_name || null,
       tool_use_id: p.tool_use_id || null,
       agent,
+      agent_id: p.agent_id || (p.tool_response && (p.tool_response.agentId || p.tool_response.agent_id)) || null,
       model,
       desc: clip(ti.description, 100),
       prompt: p.hook_event_name === 'UserPromptSubmit' ? clip(p.prompt, 100) : null,
