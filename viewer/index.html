@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multi-model timeline</title>
+<style>
+  :root {
+    --bg: #111214; --panel: #1a1c1f; --line: #2a2d32; --text: #e6e7e9; --mute: #8b9099;
+    --sonnet: #fbbf24; --haiku: #2dd4bf; --opus: #a78bfa; --other: #94a3b8; --err: #f87171;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--mono); padding: 20px; }
+  h1 { font-size: 15px; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 4px; }
+  .sub { color: var(--mute); margin-bottom: 16px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 16px; }
+  button, label.btn { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+    padding: 7px 12px; font: inherit; cursor: pointer; }
+  button:hover, label.btn:hover { border-color: var(--mute); }
+  input[type=file] { display: none; }
+  #drop { border: 1px dashed var(--line); border-radius: 8px; padding: 10px 14px; color: var(--mute); flex: 1; min-width: 220px; }
+  #drop.over { border-color: var(--haiku); color: var(--text); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .card .k { color: var(--mute); font-size: 12px; }
+  .card .v { font-size: 22px; margin-top: 2px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow-x: auto; margin-bottom: 16px; }
+  svg text { font-family: var(--mono); }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--mute); font-weight: normal; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  .legend span { margin-right: 14px; color: var(--mute); }
+  #msg { color: var(--mute); }
+</style>
+</head>
+<body>
+<h1>3 models &middot; 1 session</h1>
+<div class="sub">Timeline panggilan subagent dari <code>.claude/logs/events.jsonl</code></div>
+
+<div class="bar">
+  <label class="btn">Pilih events.jsonl<input id="file" type="file" accept=".jsonl,.json,.txt"></label>
+  <button id="sample">Muat contoh</button>
+  <div id="drop">atau seret fail events.jsonl ke sini</div>
+</div>
+<div id="msg"></div>
+
+<div class="cards" id="cards"></div>
+<div class="panel"><div class="legend" id="legend"></div><svg id="chart" width="100%"></svg></div>
+<div class="panel"><table id="log"></table></div>
+
+<script>
+// ---------- sample data (offsets in ms from t=0) ----------
+const SAMPLE = [
+  [0, 'UserPromptSubmit', null, null, null, 'Buat fungsi purata + test'],
+  [4000, 'PreToolUse', 'repo-crawler', 'haiku', 'a1', 'map the repo'],
+  [4900, 'PostToolUse', 'repo-crawler', 'haiku', 'a1'],
+  [5000, 'PreToolUse', 'repo-crawler', 'haiku', 'a2', 'find call sites'],
+  [5800, 'PostToolUse', 'repo-crawler', 'haiku', 'a2'],
+  [6000, 'PreToolUse', 'reviewer', 'opus', 'b1', 'review the plan'],
+  [7700, 'PostToolUse', 'reviewer', 'opus', 'b1'],
+  [13000, 'PreToolUse', 'repo-crawler', 'haiku', 'a3', 'run the test suite'],
+  [15500, 'PostToolUse', 'repo-crawler', 'haiku', 'a3', null, true],
+  [18000, 'PreToolUse', 'repo-crawler', 'haiku', 'a4', 're-run the test suite'],
+  [20200, 'PostToolUse', 'repo-crawler', 'haiku', 'a4', null, true],
+  [20500, 'PreToolUse', 'reviewer', 'opus', 'b2', 'same error x2: diagnose'],
+  [22400, 'PostToolUse', 'reviewer', 'opus', 'b2'],
+  [27000, 'PreToolUse', 'repo-crawler', 'haiku', 'a5', 'run the test suite'],
+  [28600, 'PostToolUse', 'repo-crawler', 'haiku', 'a5'],
+  [29000, 'PreToolUse', 'reviewer', 'opus', 'b3', 'final diff review'],
+  [30800, 'PostToolUse', 'reviewer', 'opus', 'b3'],
+  [31500, 'Stop'],
+].map(([dt, event, agent, model, id, desc, error]) => ({
+  ts: 1760000000000 + dt, event, agent, model, tool_use_id: id, desc, error,
+  tool: event.endsWith('ToolUse') ? 'Task' : null, prompt: event === 'UserPromptSubmit' ? desc : null,
+}));
+
+// ---------- parsing ----------
+const COLORS = { haiku: 'var(--haiku)', sonnet: 'var(--sonnet)', opus: 'var(--opus)' };
+const colorOf = (m) => COLORS[(m || '').toLowerCase()] || 'var(--other)';
+
+function parseJSONL(text) {
+  const out = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try { out.push(JSON.parse(line)); } catch (_) {}
+  }
+  return out;
+}
+
+function build(events) {
+  events = events.filter((e) => e && e.ts).sort((a, b) => a.ts - b.ts);
+  if (!events.length) return null;
+  const t0 = events[0].ts, tmax = events[events.length - 1].ts;
+  const spans = [], open = [];
+  let turn = null;
+  for (const e of events) {
+    if (e.event === 'UserPromptSubmit') {
+      turn = { lane: 'main session', model: 'sonnet', label: e.prompt || 'prompt', start: e.ts, end: null };
+    } else if (e.event === 'Stop' && turn) {
+      turn.end = e.ts; spans.push(turn); turn = null;
+    } else if (e.event === 'PreToolUse' && (e.tool === 'Task' || e.tool === 'Agent')) {
+      const s = { lane: e.agent || 'subagent', model: e.model, label: e.desc || '', start: e.ts, end: null, id: e.tool_use_id };
+      spans.push(s); open.push(s);
+    } else if (e.event === 'PostToolUse' && (e.tool === 'Task' || e.tool === 'Agent')) {
+      let i = e.tool_use_id ? open.findIndex((s) => s.id === e.tool_use_id) : -1;
+      if (i < 0) i = open.findIndex((s) => s.lane === (e.agent || 'subagent'));
+      if (i >= 0) { open[i].end = e.ts; open[i].error = !!e.error; open.splice(i, 1); }
+    }
+  }
+  if (turn) { turn.end = tmax; spans.push(turn); }
+  for (const s of open) s.end = tmax;
+  for (const s of spans) if (s.end == null) s.end = tmax;
+  const lanes = [];
+  for (const s of spans) if (!lanes.includes(s.lane)) lanes.push(s.lane);
+  lanes.sort((a, b) => (a === 'main session' ? -1 : b === 'main session' ? 1 : 0));
+  return { t0, dur: Math.max(tmax - t0, 1000), spans, lanes };
+}
+
+// ---------- rendering ----------
+const NS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs, text, ns) {
+  const n = ns ? document.createElementNS(NS, tag) : document.createElement(tag);
+  for (const k in attrs || {}) n.setAttribute(k, attrs[k]);
+  if (text != null) n.textContent = text;
+  return n;
+}
+const fmt = (ms) => (ms / 1000).toFixed(1) + 's';
+
+function render(model) {
+  const { t0, dur, spans, lanes } = model;
+  const cards = document.getElementById('cards'); cards.replaceChildren();
+  const subs = spans.filter((s) => s.lane !== 'main session');
+  const errs = subs.filter((s) => s.error).length;
+  const mk = (k, v) => { const c = el('div', { class: 'card' }); c.append(el('div', { class: 'k' }, k), el('div', { class: 'v' }, v)); cards.append(c); };
+  mk('jumlah masa', fmt(dur));
+  mk('panggilan subagent', String(subs.length));
+  mk('ralat', String(errs));
+  for (const l of lanes.filter((x) => x !== 'main session')) {
+    const ss = subs.filter((s) => s.lane === l);
+    mk(l + (ss[0] && ss[0].model ? ' (' + ss[0].model + ')' : ''), ss.length + ' panggilan · ' + fmt(ss.reduce((a, s) => a + (s.end - s.start), 0)));
+  }
+
+  const legend = document.getElementById('legend'); legend.replaceChildren();
+  for (const [name, c] of [['sonnet', COLORS.sonnet], ['haiku', COLORS.haiku], ['opus', COLORS.opus]]) {
+    const sp = el('span'); const d = el('i', { class: 'dot' }); d.style.background = c; sp.append(d, name); legend.append(sp);
+  }
+
+  const W = 1000, LW = 190, RH = 46, TOP = 26, H = TOP + lanes.length * RH + 10;
+  const svg = document.getElementById('chart'); svg.replaceChildren();
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', Math.min(H, 360));
+  const x = (t) => LW + ((t - t0) / dur) * (W - LW - 12);
+  const step = [0.5, 1, 2, 5, 10, 15, 30, 60, 120].find((s) => (dur / 1000) / s <= 12) || 300;
+  for (let s = 0; s <= dur / 1000 + 0.001; s += step) {
+    const px = x(t0 + s * 1000);
+    svg.append(el('line', { x1: px, x2: px, y1: TOP - 6, y2: H - 6, stroke: 'var(--line)' }, null, 1));
+    svg.append(el('text', { x: px, y: 14, fill: 'var(--mute)', 'font-size': 11, 'text-anchor': 'middle' }, s + 's', 1));
+  }
+  lanes.forEach((l, i) => {
+    const y = TOP + i * RH;
+    const first = spans.find((s) => s.lane === l);
+    svg.append(el('text', { x: 6, y: y + 20, fill: 'var(--text)', 'font-size': 13 }, l, 1));
+    if (first && first.model) svg.append(el('text', { x: 6, y: y + 36, fill: colorOf(first.model), 'font-size': 11 }, first.model, 1));
+    for (const s of spans.filter((q) => q.lane === l)) {
+      const w = Math.max(x(s.end) - x(s.start), 3);
+      const r = el('rect', { x: x(s.start), y: y + 6, width: w, height: 28, rx: 5, fill: colorOf(s.model), opacity: 0.9,
+        stroke: s.error ? 'var(--err)' : 'none', 'stroke-width': 2 }, null, 1);
+      r.append(el('title', {}, `${l} · ${fmt(s.end - s.start)}${s.label ? ' · ' + s.label : ''}${s.error ? ' · ERROR' : ''}`, 1));
+      svg.append(r);
+      if (w > 60 && s.label) svg.append(el('text', { x: x(s.start) + 6, y: y + 25, fill: '#111', 'font-size': 11, 'pointer-events': 'none' }, s.label.slice(0, Math.floor(w / 7)), 1));
+    }
+  });
+
+  const log = document.getElementById('log'); log.replaceChildren();
+  const hr = el('tr'); ['masa', 'lane', 'tugas', 'tempoh'].forEach((h) => hr.append(el('th', {}, h))); log.append(hr);
+  for (const s of spans.slice().sort((a, b) => a.start - b.start)) {
+    const tr = el('tr');
+    tr.append(el('td', {}, (Math.round((s.start - t0) / 100) / 10).toFixed(1) + 's'));
+    const td = el('td'); const d = el('i', { class: 'dot' }); d.style.background = colorOf(s.model); td.append(d, s.lane); tr.append(td);
+    const tk = el('td', {}, (s.label || '') + (s.error ? '  ✗ error' : '')); if (s.error) tk.style.color = 'var(--err)'; tr.append(tk);
+    tr.append(el('td', {}, fmt(s.end - s.start)));
+    log.append(tr);
+  }
+}
+
+function show(events, note) {
+  const m = build(events);
+  document.getElementById('msg').textContent = m ? note : 'Tiada event dijumpai dalam fail.';
+  if (m) render(m);
+}
+
+// ---------- input ----------
+const readFile = (f) => f.text().then((t) => show(parseJSONL(t), 'Dimuat: ' + f.name));
+document.getElementById('file').addEventListener('change', (e) => e.target.files[0] && readFile(e.target.files[0]));
+document.getElementById('sample').addEventListener('click', () => show(SAMPLE, 'Data contoh (bukan sesi sebenar).'));
+const drop = document.getElementById('drop');
+['dragover', 'dragenter'].forEach((n) => drop.addEventListener(n, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach((n) => drop.addEventListener(n, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', (e) => e.dataTransfer.files[0] && readFile(e.dataTransfer.files[0]));
+
+// If served over http from the repo root, load the real log automatically.
+if (location.protocol.startsWith('http')) {
+  fetch('../.claude/logs/events.jsonl', { cache: 'no-store' })
+    .then((r) => (r.ok ? r.text() : Promise.reject()))
+    .then((t) => show(parseJSONL(t), 'Dimuat dari .claude/logs/events.jsonl'))
+    .catch(() => show(SAMPLE, 'Belum ada log sebenar. Papar data contoh.'));
+} else {
+  show(SAMPLE, 'Papar data contoh. Pilih events.jsonl untuk lihat sesi sebenar.');
+}
+</script>
+</body>
+</html>
