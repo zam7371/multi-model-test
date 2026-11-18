@@ -34,6 +34,7 @@ process.stdin.on('end', () => {
       agent_id: p.agent_id || (p.tool_response && (p.tool_response.agentId || p.tool_response.agent_id)) || null,
       model,
       desc: clip(ti.description, 100),
+      detail: clip(ti.command || ti.file_path || ti.pattern || ti.path || ti.url || ti.query, 80),
       prompt: p.hook_event_name === 'UserPromptSubmit' ? clip(p.prompt, 100) : null,
       error: p.tool_response && p.tool_response.is_error ? true : undefined,
     };
