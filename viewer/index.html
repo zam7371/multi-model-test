@@ -97,6 +97,8 @@ function build(events) {
   let turn = null;
   for (const e of events) {
     if (e.event === 'UserPromptSubmit') {
+      // Subagents also fire UserPromptSubmit; keep the first prompt of an open turn.
+      if (turn) continue;
       turn = { lane: 'main session', model: 'sonnet', label: e.prompt || 'prompt', start: e.ts, end: null };
     } else if (e.event === 'Stop' && turn) {
       turn.end = e.ts; spans.push(turn); turn = null;
